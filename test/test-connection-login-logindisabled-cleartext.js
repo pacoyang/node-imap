@@ -31,8 +31,12 @@ var srv = net.createServer(function(sock) {
       lines = buf.split(CRLF);
       buf = lines.pop();
       lines.forEach(function(l) {
-        if (/AUTHENTICATE/i.test(l) || /^\S+ LOGIN /i.test(l))
+        if (/AUTHENTICATE/i.test(l) || /^\S+ LOGIN /i.test(l)) {
           sawAuthenticate = true;
+          // Reject so a regression fails immediately via the client's error
+          // path instead of stalling the suite until authTimeout fires.
+          sock.write(l.split(' ')[0] + ' NO AUTHENTICATE failed.' + CRLF);
+        }
         if (l === 'A0 CAPABILITY') {
           sock.write(['* CAPABILITY IMAP4rev1 LOGINDISABLED AUTH=XOAUTH2 '
                         + 'SASL-IR NAMESPACE',
@@ -59,17 +63,23 @@ srv.listen(0, '127.0.0.1', function() {
   });
   imap.once('error', function(err) {
     connErr = err;
+  });
+  // Failsafe: whenever the connection dies -- expected auth error or not --
+  // stop listening so the process can exit and the exit assertions run.
+  imap.once('close', function() {
     srv.close();
   });
   imap.connect();
 });
 
 process.once('exit', function() {
+  // The security guard comes first so a regression reports as a credential
+  // leak, not as whatever secondary error the leak happened to produce.
+  assert(!sawAuthenticate,
+         'Credentials were sent over a cleartext link that advertised '
+         + 'LOGINDISABLED');
   assert(!ready, 'Must not authenticate over cleartext when LOGINDISABLED');
   assert(connErr !== undefined, 'Expected an authentication error');
   assert.strictEqual(connErr.message, 'Logging in is disabled on this server');
   assert.strictEqual(connErr.source, 'authentication');
-  assert(!sawAuthenticate,
-         'Credentials were sent over a cleartext link that advertised '
-         + 'LOGINDISABLED');
 });
